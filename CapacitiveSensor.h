@@ -1,12 +1,29 @@
 /*
-  CapacitiveSense.h v.04 - Capacitive Sensing Library for 'duino / Wiring
-  https://github.com/PaulStoffregen/CapacitiveSensor
-  http://www.pjrc.com/teensy/td_libs_CapacitiveSensor.html
-  http://playground.arduino.cc/Main/CapacitiveSensor
-  Copyright (c) 2008 Paul Bagder  All rights reserved.
-  Version 05 by Paul Stoffregen - Support non-AVR board: Teensy 3.x, Arduino Due
-  Version 04 by Paul Stoffregen - Arduino 1.0 compatibility, issue 146 fix
-  vim: set ts=4:
+ CapacitiveSense.h - Capacitive Sensing Library for 'duino / Wiring
+ https://github.com/PaulStoffregen/CapacitiveSensor
+ http://www.pjrc.com/teensy/td_libs_CapacitiveSensor.html
+ http://playground.arduino.cc/Main/CapacitiveSensor
+ Copyright (c) 2009 Paul Bagder
+ Updates for other hardare by Paul Stoffregen, 2010-2016
+ vim: set ts=4:
+
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.
 */
 
 // ensure this library description is only included once
@@ -53,6 +70,17 @@
 #define DIRECT_WRITE_LOW(base, mask)    (*((base)+8) = (mask))
 #define DIRECT_WRITE_HIGH(base, mask)   (*((base)+4) = (mask))
 
+#elif defined(__IMXRT1052__) || defined(__IMXRT1062__)
+#define PIN_TO_BASEREG(pin)             (portOutputRegister(pin))
+#define PIN_TO_BITMASK(pin)             (digitalPinToBitMask(pin))
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+#define DIRECT_READ(base, mask)         ((*((base)+2) & (mask)) ? 1 : 0)
+#define DIRECT_MODE_INPUT(base, mask)   (*((base)+1) &= ~(mask))
+#define DIRECT_MODE_OUTPUT(base, mask)  (*((base)+1) |= (mask))
+#define DIRECT_WRITE_LOW(base, mask)    (*((base)+34) = (mask))
+#define DIRECT_WRITE_HIGH(base, mask)   (*((base)+33) = (mask))
+
 #elif defined(__SAM3X8E__)
 #define PIN_TO_BASEREG(pin)             (&(digitalPinToPort(pin)->PIO_PER))
 #define PIN_TO_BITMASK(pin)             (digitalPinToBitMask(pin))
@@ -76,15 +104,134 @@
 #define DIRECT_WRITE_HIGH(base, mask)   ((*(base+8+2)) = (mask))          //LATXSET + 0x28
 
 #elif defined(ARDUINO_ARCH_ESP8266)
-#define PIN_TO_BASEREG(pin)             (portOutputRegister(digitalPinToPort(pin)))
-#define PIN_TO_BITMASK(pin)             (digitalPinToBitMask(pin))
+#define PIN_TO_BASEREG(pin) ((volatile uint32_t*) GPO)
+#define PIN_TO_BITMASK(pin) (1 << pin)
 #define IO_REG_TYPE uint32_t
 #define IO_REG_ASM
-#define DIRECT_READ(base, mask)         (((*(base+6)) & (mask)) ? 1 : 0)    //GPIO_IN_ADDRESS
-#define DIRECT_MODE_INPUT(base, mask)   ((*(base+5)) = (mask))              //GPIO_ENABLE_W1TC_ADDRESS
-#define DIRECT_MODE_OUTPUT(base, mask)  ((*(base+4)) = (mask))              //GPIO_ENABLE_W1TS_ADDRESS
-#define DIRECT_WRITE_LOW(base, mask)    ((*(base+2)) = (mask))              //GPIO_OUT_W1TC_ADDRESS
-#define DIRECT_WRITE_HIGH(base, mask)   ((*(base+1)) = (mask))              //GPIO_OUT_W1TS_ADDRESS
+#define DIRECT_READ(base, mask) ((GPI & (mask)) ? 1 : 0) //GPIO_IN_ADDRESS
+#define DIRECT_MODE_INPUT(base, mask) (GPE &= ~(mask)) //GPIO_ENABLE_W1TC_ADDRESS
+#define DIRECT_MODE_OUTPUT(base, mask) (GPE |= (mask)) //GPIO_ENABLE_W1TS_ADDRESS
+#define DIRECT_WRITE_LOW(base, mask) (GPOC = (mask)) //GPIO_OUT_W1TC_ADDRESS
+#define DIRECT_WRITE_HIGH(base, mask) (GPOS = (mask)) //GPIO_OUT_W1TS_ADDRESS
+
+#elif defined(ARDUINO_ARCH_ESP32)
+#include <driver/rtc_io.h>
+#include <soc/gpio_struct.h>
+#define PIN_TO_BASEREG(pin)             (0)
+#define PIN_TO_BITMASK(pin)             (pin)
+#define IO_REG_TYPE uint32_t
+#define IO_REG_BASE_ATTR
+#define IO_REG_MASK_ATTR
+
+static inline __attribute__((always_inline))
+IO_REG_TYPE directRead(IO_REG_TYPE pin)
+{
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    return (GPIO.in.val >> pin) & 0x1;
+#else // plain ESP32
+    if ( pin < 32 )
+        return (GPIO.in >> pin) & 0x1;
+    else if ( pin < 46 )
+        return (GPIO.in1.val >> (pin - 32)) & 0x1;
+#endif
+
+    return 0;
+}
+
+static inline __attribute__((always_inline))
+void directWriteLow(IO_REG_TYPE pin)
+{
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    GPIO.out_w1tc.val = ((uint32_t)1 << pin);
+#else // plain ESP32
+    if ( pin < 32 )
+        GPIO.out_w1tc = ((uint32_t)1 << pin);
+    else if ( pin < 46 )
+        GPIO.out1_w1tc.val = ((uint32_t)1 << (pin - 32));
+#endif
+}
+
+static inline __attribute__((always_inline))
+void directWriteHigh(IO_REG_TYPE pin)
+{
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    GPIO.out_w1ts.val = ((uint32_t)1 << pin);
+#else // plain ESP32
+    if ( pin < 32 )
+        GPIO.out_w1ts = ((uint32_t)1 << pin);
+    else if ( pin < 46 )
+        GPIO.out1_w1ts.val = ((uint32_t)1 << (pin - 32));
+#endif
+}
+
+static inline __attribute__((always_inline))
+void directModeInput(IO_REG_TYPE pin)
+{
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    GPIO.enable_w1tc.val = ((uint32_t)1 << (pin));
+#else
+    if ( digitalPinIsValid(pin) )
+    {
+#if ESP_IDF_VERSION_MAJOR < 4      // IDF 3.x ESP32/PICO-D4
+        uint32_t rtc_reg(rtc_gpio_desc[pin].reg);
+
+        if ( rtc_reg ) // RTC pins PULL settings
+        {
+            ESP_REG(rtc_reg) = ESP_REG(rtc_reg) & ~(rtc_gpio_desc[pin].mux);
+            ESP_REG(rtc_reg) = ESP_REG(rtc_reg) & ~(rtc_gpio_desc[pin].pullup | rtc_gpio_desc[pin].pulldown);
+        }
+#endif
+	// Input
+        if ( pin < 32 )
+            GPIO.enable_w1tc = ((uint32_t)1 << pin);
+        else
+            GPIO.enable1_w1tc.val = ((uint32_t)1 << (pin - 32));
+    }
+#endif
+}
+
+static inline __attribute__((always_inline))
+void directModeOutput(IO_REG_TYPE pin)
+{
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    GPIO.enable_w1ts.val = ((uint32_t)1 << (pin));
+#else
+    if ( digitalPinIsValid(pin) /* && pin <= 33 */ ) // Use Any In/Out pins 
+    {
+#if ESP_IDF_VERSION_MAJOR < 4      // IDF 3.x ESP32/PICO-D4
+        uint32_t rtc_reg(rtc_gpio_desc[pin].reg);
+
+        if ( rtc_reg ) // RTC pins PULL settings
+        {
+            ESP_REG(rtc_reg) = ESP_REG(rtc_reg) & ~(rtc_gpio_desc[pin].mux);
+            ESP_REG(rtc_reg) = ESP_REG(rtc_reg) & ~(rtc_gpio_desc[pin].pullup | rtc_gpio_desc[pin].pulldown);
+        }
+#endif
+        // Output
+        if ( pin < 32 )
+            GPIO.enable_w1ts = ((uint32_t)1 << pin);
+        else // already validated to pins <= 33
+            GPIO.enable1_w1ts.val = ((uint32_t)1 << (pin - 32));
+    }
+#endif
+}
+
+#define DIRECT_READ(base, pin)          directRead(pin)
+#define DIRECT_WRITE_LOW(base, pin)     directWriteLow(pin)
+#define DIRECT_WRITE_HIGH(base, pin)    directWriteHigh(pin)
+#define DIRECT_MODE_INPUT(base, pin)    directModeInput(pin)
+#define DIRECT_MODE_OUTPUT(base, pin)   directModeOutput(pin)
+// https://github.com/PaulStoffregen/OneWire/pull/47
+// https://github.com/stickbreaker/OneWire/commit/6eb7fc1c11a15b6ac8c60e5671cf36eb6829f82c
+#ifdef  interrupts
+#undef  interrupts
+#endif
+#ifdef  noInterrupts
+#undef  noInterrupts
+#endif
+#define noInterrupts() {portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;portENTER_CRITICAL(&mux)
+#define interrupts() portEXIT_CRITICAL(&mux);}
+//#warning, code is copied from "ESP32 OneWire testing"
 
 #elif defined(__SAMD21G18A__)
 // runs extremely slow/unreliable on Arduino Zero - help wanted....
@@ -97,6 +244,38 @@
 #define DIRECT_MODE_OUTPUT(base, mask)  ((*((base)+2)) = (mask))
 #define DIRECT_WRITE_LOW(base, mask)    ((*((base)+5)) = (mask))
 #define DIRECT_WRITE_HIGH(base, mask)   ((*((base)+6)) = (mask))
+
+#elif defined(__SAMD51__)
+#define PIN_TO_BASEREG(pin)             portModeRegister(digitalPinToPort(pin))
+#define PIN_TO_BITMASK(pin)             (digitalPinToBitMask(pin))
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+#define DIRECT_READ(base, mask)         (((*((base)+8)) & (mask)) ? 1 : 0) // IN
+#define DIRECT_MODE_INPUT(base, mask)   ((*((base)+1)) = (mask)) // DIRCLR
+#define DIRECT_MODE_OUTPUT(base, mask)  ((*((base)+2)) = (mask)) // DIRSET
+#define DIRECT_WRITE_LOW(base, mask)    ((*((base)+5)) = (mask)) // OUTCLR
+#define DIRECT_WRITE_HIGH(base, mask)   ((*((base)+6)) = (mask)) /// OUTSET
+
+#elif defined(ARDUINO_NRF52_ADAFRUIT) || defined(ARDUINO_ARCH_NRF52840)
+
+/* 
+Required for the Arduino Nano 33 BLE Sense to satisfy the compiler
+as build.f_cpu is not defined in the boards.txt file.
+The concept of F_CPU doesn't fully apply as mbed RTOS is used which uses preemption.
+*/
+#if defined(ARDUINO_ARCH_NRF52840) && !defined(F_CPU)
+#define F_CPU 64000000L
+#endif
+
+#define PIN_TO_BASEREG(pin)             (0)
+#define PIN_TO_BITMASK(pin)             digitalPinToPinName(pin)
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+#define DIRECT_READ(base, pin)          nrf_gpio_pin_read(pin)
+#define DIRECT_WRITE_LOW(base, pin)     nrf_gpio_pin_clear(pin)
+#define DIRECT_WRITE_HIGH(base, pin)    nrf_gpio_pin_set(pin)
+#define DIRECT_MODE_INPUT(base, pin)    nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_NOPULL)
+#define DIRECT_MODE_OUTPUT(base, pin)   nrf_gpio_cfg_output(pin)
 
 #elif defined(RBL_NRF51822)
 #define PIN_TO_BASEREG(pin)             (0)
@@ -189,6 +368,42 @@ void directWriteHigh(volatile IO_REG_TYPE *base, IO_REG_TYPE pin)
 #define DIRECT_WRITE_LOW(base, pin)	directWriteLow(base, pin)
 #define DIRECT_WRITE_HIGH(base, pin)	directWriteHigh(base, pin)
 
+
+#elif defined(ARDUINO_ARCH_STM32)
+
+#define PIN_TO_BASEREG(pin)             (0)
+#define PIN_TO_BITMASK(pin)             (pin)
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+
+#define DIRECT_READ(base, pin)          digitalRead(pin)
+#define DIRECT_MODE_INPUT(base, pin)    pinMode(pin,INPUT)
+#define DIRECT_MODE_OUTPUT(base, pin)   pinMode(pin,OUTPUT)
+#define DIRECT_WRITE_LOW(base, pin)     digitalWrite(pin, LOW)
+#define DIRECT_WRITE_HIGH(base, pin)    digitalWrite(pin, HIGH)
+
+#elif defined(ARDUINO_ARCH_APOLLO3)
+#define PIN_TO_BASEREG(pin) (0)
+#define PIN_TO_BITMASK(pin) (pin)
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+#define DIRECT_READ(base, mask) (am_hal_gpio_input_read(mask))
+#define DIRECT_MODE_INPUT(base, mask) (am_hal_gpio_pinconfig(mask, g_AM_HAL_GPIO_INPUT))
+#define DIRECT_MODE_OUTPUT(base, mask) (am_hal_gpio_pinconfig(mask, g_AM_HAL_GPIO_OUTPUT))
+#define DIRECT_WRITE_LOW(base, mask) (am_hal_gpio_output_clear(mask))
+#define DIRECT_WRITE_HIGH(base, mask) (am_hal_gpio_output_set(mask))
+
+#elif defined(ARDUINO_ARCH_RTTHREAD)
+#define PIN_TO_BASEREG(pin)             (0)
+#define PIN_TO_BITMASK(pin)             (pin)
+#define IO_REG_TYPE uint32_t
+#define IO_REG_ASM
+#define DIRECT_READ(base, pin)          digitalRead(pin)
+#define DIRECT_MODE_INPUT(base, pin)    pinMode(pin,INPUT)
+#define DIRECT_MODE_OUTPUT(base, pin)   pinMode(pin,OUTPUT)
+#define DIRECT_WRITE_LOW(base, pin)     digitalWrite(pin, LOW)
+#define DIRECT_WRITE_HIGH(base, pin)    digitalWrite(pin, HIGH)
+
 #endif
 
 // some 3.3V chips with 5V tolerant pins need this workaround
@@ -219,9 +434,10 @@ class CapacitiveSensor
 	unsigned long  CS_AutocaL_Millis;
 	unsigned long  lastCal;
 	unsigned long  total;
-	
-	volatile unsigned sPin;
-	volatile unsigned rPin;
+	IO_REG_TYPE sBit;   // send pin's ports and bitmask
+	volatile IO_REG_TYPE *sReg;
+	IO_REG_TYPE rBit;    // receive pin's ports and bitmask
+	volatile IO_REG_TYPE *rReg;
   // methods
 	int SenseOneCycle(void);
 };
